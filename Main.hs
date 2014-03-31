@@ -7,6 +7,7 @@ import Data.Time.Clock
 import Data.Map (Map)
 import qualified Data.Map as M
 import Data.Maybe
+import Data.Ord (comparing)
 import Debug.Trace
 
 -- * Representation
@@ -25,6 +26,9 @@ containsPower (Table rows) p =
   any (any (== Just p)) rows 
 
 data Dir = L | R | U | D
+  deriving (Show)
+
+directions = [L, R, U, D]
 
 -- * Shifting
 
@@ -73,8 +77,17 @@ nexts :: Table -> [Table]
 nexts (Table rows) =
   map Table . substWith rows $ \row ->
     substWith row $ \elem -> case elem of
-      Nothing -> [Just 2, Just 4]
+      Nothing -> [p 1, p 2]
       _       -> []
+
+-- | Performs random tile generation + shift, yields only if the shift makes a
+--   difference.
+validNexts :: Table -> [Table]
+validNexts t = do
+  nt <- nexts t
+  shifted <- map (shift nt) directions
+  guard (shifted /= nt)
+  return shifted
 
 -- * Heuristics
 
@@ -82,20 +95,25 @@ currentTime :: IO DiffTime
 currentTime = fmap utctDayTime getCurrentTime
 
 evalDepth 
-  :: Int  -- ^ Depth remaining
+  :: DiffTime -- ^ Absolute deadline
+  -> Int  -- ^ Depth remaining
   -> Table
-  -> (Table -> IO (Maybe a))  -- ^ Heuristic (time-capped)
+  -> (Table -> a)  -- ^ Heuristic
   -> (Table -> a)  -- ^ Heuristics for final state
   -> ([Maybe a] -> Maybe a) -- ^ Heuristic combiner
   -> IO (Maybe a)
-evalDepth d t f g c = go d t
+evalDepth deadline d t f g c = go d t
   where
-  go 0 t = f t
-  go d t = 
-    let nts = nexts t  -- TODO use version having directions here
-    in if null nts
-       then return . Just . g $ t
-       else fmap c . sequence . map (go (d - 1)) $ nts
+  go d t = do
+    current_t <- currentTime
+    if current_t >= deadline
+    then return Nothing
+    else case d of
+      0 -> return . Just . f $ t
+      _ -> let nts = validNexts t
+           in if null nts
+              then return . Just . g $ t
+              else fmap c . sequence . map (go (d - 1)) $ nts
 
 withDeadline
   :: (a -> b) 
@@ -107,24 +125,46 @@ withDeadline f deadline a = do
     then Just (f a)
     else Nothing
 
-heur1 :: Table -> Double
-heur1 t = 0.0
-
-worst :: [Maybe Double] -> Maybe Double
-worst ms = trace (show ms) $ case catMaybes ms of
+weighted :: [Maybe (Int, Double)] -> Maybe (Int, Double)
+weighted ms = case catMaybes ms of
   [] -> Nothing
-  x:xs -> Just (foldl' min x xs)
+  xs -> let sum_w = sum . map fst $ xs
+            total = sum . map (\(w,x) -> fromIntegral w * x) $ xs
+        in Just (sum_w, total / fromIntegral sum_w)
+
+feat_extra_powers :: Table -> Double
+feat_extra_powers (Table rows) =
+  let power_counts = map (\(x:xs) -> (x, 1 + length xs)) . L.group . L.sort .
+                       catMaybes . concat $ rows 
+  in fromIntegral . sum . 
+       map (\(power, cnt) -> (cnt - 2)*(2^power)) . 
+       filter ((> 2) . snd) $ power_counts
+
+feat_sum :: Table -> Double
+feat_sum (Table rows) =
+  fromIntegral . sum . map (2^) . catMaybes . concat $ rows
+
+heur1 :: Table -> (Int, Double)
+heur1 t = (1, feat_sum t - 0.75 * feat_extra_powers t)
 
 targetPower = 11
 
-final :: Table -> Double
-final t = if t `containsPower` targetPower then 99999 else -99999
+final :: Table -> (Int, Double)
+final t = (1, if t `containsPower` targetPower then 99999 else -99999)
 
-eval1 :: Int -> Table -> IO (Maybe Double) 
+eval1 :: Int -> Table -> IO (Maybe (Int, Double)) 
 eval1 d t = do
   current_t <- currentTime
   let deadline = current_t + secondsToDiffTime 1
-  evalDepth d t (withDeadline heur1 deadline) final worst 
+  evalDepth deadline d t heur1 final weighted
+
+decide :: Table -> IO (Dir, Table)
+decide t = do
+  let start_tables = filter ((/= t) . snd) . 
+                       map (\d -> (d, shift t d)) $ directions
+  dir_scores <- mapM (\(d,s) -> ((\score -> ((d,s), score)) . maybe 0 snd) `fmap` eval1 2 s)
+                  start_tables
+  return . fst . L.maximumBy (comparing snd) $ dir_scores
 
 -- * Parse and main
 
@@ -140,4 +180,9 @@ numConv x = Just $ case x of
 main = do
   input <- getContents
   let table = Table . map (map (numConv . read) . words) . lines $ input
-  print table
+  (best_dir, _) <- decide table
+  putStrLn $ case best_dir of
+    L -> "LEFT"
+    R -> "RIGHT"
+    U -> "UP"
+    D -> "DOWN"
