@@ -79,7 +79,7 @@ nexts :: Table -> [Table]
 nexts (Table rows) =
   map Table . substWith rows $ \row ->
     substWith row $ \elem -> case elem of
-      Nothing -> [p 1, p 2]
+      Nothing -> [p 1] -- , p 2]  -- p 2 has lower change, let's not care
       _       -> []
 
 type Cut = forall a . [a] -> IO [a]
@@ -117,12 +117,11 @@ evalDepth deadline dc t c = go (dc_depth dc) t
       _ -> do
         nts <- validNexts cut t
         if null nts
-           then return . Just . g $ t
+           then return . Just . f $ t
            else fmap c . sequence . map (go (d - 1)) $ nts
     where
     cut = dc_cut dc
     f = dc_heur dc
-    g = dc_final_heur dc
 
 weighted :: [Maybe (Int, Double)] -> Maybe (Int, Double)
 weighted ms = case catMaybes ms of
@@ -211,38 +210,34 @@ heur2 t = 1.0  * feat_sum t
         - 0.75 * feat_extra_powers t
         + 1.0  * feat_free t
 
-heur3 t = 1.0  * feat_sum t 
+heur3 t = 0 --1.0  * feat_sum t 
         + 1.0  * feat_free t
 
 heur4 t = 1.0  * feat_free t
-        + 0.25 * feat_ordered_rel t
+        -- + 0.25 * feat_ordered_rel t
         + 0.1  * feat_sticky t
 
 heur5 t = 1.0  * feat_free t
         + 1.0  * feat_ordered t
 
-final t = if t `containsPower` targetPower then 99999 else -99999
-  where
-  targetPower = 11
-
 evalW :: WDecideConfig -> Table -> IO (Maybe (Int, Double)) 
 evalW dc t = do
   current_t <- currentTime
-  let deadline = current_t + secondsToDiffTime 1
+  let deadline = current_t + picosecondsToDiffTime (200 * 1000 * 1000 * 1000)
   evalDepth deadline dc t weighted
 
 data DecideConfig a = DecideConfig
   { dc_heur :: Table -> a
-  , dc_final_heur :: Table -> a
   , dc_depth :: Int
   , dc_cut :: Cut
   }
 
 type WDecideConfig = DecideConfig (Int, Double)
 
-defaultConfig = DecideConfig (toWeighted heur1) (toWeighted final) 2 (return . id)
+defaultConfig = DecideConfig (toWeighted heur1) 2 (return . id)
 bestConfig = defaultConfig 
-  { dc_heur = toWeighted heur3 
+  { dc_heur = toWeighted heur3
+  , dc_depth = 3
   }
 
 decide :: WDecideConfig -> Table -> IO (Maybe (Dir, Table))

@@ -44,7 +44,7 @@ loopSteps should_print dc t0 = go t0
 
 reference_config = defaultConfig
   { dc_heur = toWeighted heur3
-  , dc_final_heur = toWeighted heur3
+  , dc_depth = 3
   }
 
 fast_config = reference_config
@@ -52,7 +52,6 @@ fast_config = reference_config
 
 testConfig base_config = base_config
   { dc_heur = toWeighted heur4
-  , dc_final_heur = toWeighted heur4
   --, dc_cut = niceCut 4 , dc_depth = 3
   }
 
