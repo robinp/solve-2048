@@ -1,3 +1,4 @@
+{-# LANGUAGE RankNTypes #-}
 module Main where
 
 import Control.Monad
@@ -9,6 +10,7 @@ import qualified Data.Map as M
 import Data.Maybe
 import Data.Ord (comparing)
 import Debug.Trace
+import System.Random
 
 -- * Representation
 
@@ -80,14 +82,18 @@ nexts (Table rows) =
       Nothing -> [p 1, p 2]
       _       -> []
 
+type Cut = forall a . [a] -> IO [a]
+
 -- | Performs random tile generation + shift, yields only if the shift makes a
 --   difference.
-validNexts :: Table -> [Table]
-validNexts t = do
-  nt <- nexts t
-  shifted <- map (shift nt) directions
-  guard (shifted /= nt)
-  return shifted
+validNexts :: Cut -> Table -> IO [Table]
+validNexts c t = do
+  nts <- c . nexts $ t :: IO [Table]
+  return $ do
+    nt <- nts
+    shifted <- map (shift nt) directions
+    guard (shifted /= nt)
+    return shifted
 
 -- * Heuristics
 
@@ -96,13 +102,11 @@ currentTime = fmap utctDayTime getCurrentTime
 
 evalDepth 
   :: DiffTime -- ^ Absolute deadline
-  -> Int  -- ^ Depth remaining
+  -> DecideConfig a
   -> Table
-  -> (Table -> a)  -- ^ Heuristic
-  -> (Table -> a)  -- ^ Heuristics for final state
   -> ([Maybe a] -> Maybe a) -- ^ Heuristic combiner
   -> IO (Maybe a)
-evalDepth deadline d t f g c = go d t
+evalDepth deadline dc t c = go (dc_depth dc) t
   where
   go d t = do
     current_t <- currentTime
@@ -110,20 +114,15 @@ evalDepth deadline d t f g c = go d t
     then return Nothing
     else case d of
       0 -> return . Just . f $ t
-      _ -> let nts = validNexts t
-           in if null nts
-              then return . Just . g $ t
-              else fmap c . sequence . map (go (d - 1)) $ nts
-
-withDeadline
-  :: (a -> b) 
-  -> DiffTime  -- ^ Absolute deadline
-  -> a -> IO (Maybe b)
-withDeadline f deadline a = do
-  current_t <- currentTime
-  return $ if current_t < deadline
-    then Just (f a)
-    else Nothing
+      _ -> do
+        nts <- validNexts cut t
+        if null nts
+           then return . Just . g $ t
+           else fmap c . sequence . map (go (d - 1)) $ nts
+    where
+    cut = dc_cut dc
+    f = dc_heur dc
+    g = dc_final_heur dc
 
 weighted :: [Maybe (Int, Double)] -> Maybe (Int, Double)
 weighted ms = case catMaybes ms of
@@ -144,27 +143,119 @@ feat_sum :: Table -> Double
 feat_sum (Table rows) =
   fromIntegral . sum . map (2^) . catMaybes . concat $ rows
 
-heur1 :: Table -> (Int, Double)
-heur1 t = (1, feat_sum t - 0.75 * feat_extra_powers t)
+feat_merge :: Table -> Double
+feat_merge (Table rows) =
+  let row_score = sum . map rowMerge $ rows
+      col_score = sum . map rowMerge . L.transpose $ rows
+  in row_score + col_score
+  where
+  rowMerge = fst . foldl' (\(s,l) r -> (s + pairFun l r,r)) (0, Nothing)
+  pairFun (Just p) (Just r) =
+    if abs (p - r) == 1 then 2 ^ (min p r)
+    else 0  -- or penalize? 
+  pairFun _ _ = 0
 
-targetPower = 11
+feat_ordered :: Table -> Double
+feat_ordered (Table rows) = go False 999 rows
+  where
+  go _ _ [] = 0
+  go should_rev smallest (r:rs) =
+    let (score, sm') = rowOrder smallest (if should_rev then reverse r else r)
+    in score + go (not should_rev) sm' rs
+  rowOrder smallest xs = 
+    -- count empty space as small, so score is penalizing it
+    let powers = map (maybe 0 id) xs
+    in foldl' (\(score, sm) p ->
+                if p <= sm then (score + 2^p, p) else (score - 2^p, sm))
+              (0, smallest) $ powers
 
-final :: Table -> (Int, Double)
-final t = (1, if t `containsPower` targetPower then 99999 else -99999)
+feat_ordered_rel :: Table -> Double
+feat_ordered_rel (Table rows) = go False 999 rows
+  where
+  go _ _ [] = 0
+  go should_rev prev (r:rs) =
+    let (score, pre') = rowOrder prev (if should_rev then reverse r else r)
+    in score + go (not should_rev) pre' rs
+  rowOrder previous xs = 
+    let powers = catMaybes xs
+    in foldl' (\(score, prev) p ->
+                if p <= prev then (score + 2^p, p) else (score, prev))
+              (0, previous) $ powers
 
-eval1 :: Int -> Table -> IO (Maybe (Int, Double)) 
-eval1 d t = do
+feat_free :: Table -> Double
+feat_free (Table rows) = 
+  let empties = length . filter (== Nothing) . concat $ rows
+      max_value = case catMaybes . concat $ rows of
+        [] -> 0
+        xs -> 2 ^ maximum xs
+  in fromIntegral (empties * max_value) / 16.0  -- tile_count
+
+feat_sticky :: Table -> Double
+feat_sticky (Table rows) =
+  sum . map (2^) . catMaybes . head $ rows
+
+type Heur = Table -> (Int, Double)
+
+toWeighted f = \t -> (1, f t)
+
+niceCut :: Int -> Cut
+niceCut n xs = do
+  rnds <- replicateM (length xs) (randomRIO (0, 1000)) :: IO [Int]
+  let ys = map snd . L.sortBy (comparing fst) . zip rnds $ xs
+  return $ take n ys
+
+heur1 t = 1.0  * feat_sum t 
+        - 0.75 * feat_extra_powers t
+
+heur2 t = 1.0  * feat_sum t 
+        - 0.75 * feat_extra_powers t
+        + 1.0  * feat_free t
+
+heur3 t = 1.0  * feat_sum t 
+        + 1.0  * feat_free t
+
+heur4 t = 1.0  * feat_free t
+        + 0.25 * feat_ordered_rel t
+        + 0.1  * feat_sticky t
+
+heur5 t = 1.0  * feat_free t
+        + 1.0  * feat_ordered t
+
+final t = if t `containsPower` targetPower then 99999 else -99999
+  where
+  targetPower = 11
+
+evalW :: WDecideConfig -> Table -> IO (Maybe (Int, Double)) 
+evalW dc t = do
   current_t <- currentTime
   let deadline = current_t + secondsToDiffTime 1
-  evalDepth deadline d t heur1 final weighted
+  evalDepth deadline dc t weighted
 
-decide :: Table -> IO (Dir, Table)
-decide t = do
+data DecideConfig a = DecideConfig
+  { dc_heur :: Table -> a
+  , dc_final_heur :: Table -> a
+  , dc_depth :: Int
+  , dc_cut :: Cut
+  }
+
+type WDecideConfig = DecideConfig (Int, Double)
+
+defaultConfig = DecideConfig (toWeighted heur1) (toWeighted final) 2 (return . id)
+bestConfig = defaultConfig 
+  { dc_heur = toWeighted heur3 
+  }
+
+decide :: WDecideConfig -> Table -> IO (Maybe (Dir, Table))
+decide dc t = do
   let start_tables = filter ((/= t) . snd) . 
                        map (\d -> (d, shift t d)) $ directions
-  dir_scores <- mapM (\(d,s) -> ((\score -> ((d,s), score)) . maybe 0 snd) `fmap` eval1 2 s)
+  dir_scores <- mapM (\(d,s) -> ((\score -> ((d,s), score)) . maybe 0 snd) 
+                       `fmap` evalW dc s)
                   start_tables
-  return . fst . L.maximumBy (comparing snd) $ dir_scores
+  if null dir_scores
+    then return Nothing
+    else return . Just . fst . L.maximumBy (comparing snd) $ dir_scores
+
 
 -- * Parse and main
 
@@ -180,7 +271,7 @@ numConv x = Just $ case x of
 main = do
   input <- getContents
   let table = Table . map (map (numConv . read) . words) . lines $ input
-  (best_dir, _) <- decide table
+  Just (best_dir, _) <- decide bestConfig table
   putStrLn $ case best_dir of
     L -> "LEFT"
     R -> "RIGHT"
