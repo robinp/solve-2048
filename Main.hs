@@ -3,6 +3,7 @@ module Main where
 
 import Control.Monad
 import Data.Foldable (foldl')
+import Data.Function (on)
 import qualified Data.List as L
 import Data.Time.Clock
 import Data.Map (Map)
@@ -28,7 +29,7 @@ containsPower (Table rows) p =
   any (any (== Just p)) rows 
 
 data Dir = L | R | U | D
-  deriving (Show)
+  deriving (Eq, Ord, Show)
 
 directions = [L, R, U, D]
 
@@ -87,14 +88,17 @@ type DCut = Int -> Cut
 
 -- | Performs random tile generation + shift, yields only if the shift makes a
 --   difference.
-validNexts :: Cut -> Table -> IO [Table]
+--   Returned tables are grouped by direction.
+validNexts :: Cut -> Table -> IO [[Table]]
 validNexts c t = do
   nts <- c . nexts $ t :: IO [Table]
-  return $ do
+  return . map (map (\(d,ts) -> ts)) . groupedBy fst $ do
     nt <- nts
-    shifted <- map (shift nt) directions
+    (dir, shifted) <- zip directions . map (shift nt) $ directions
     guard (shifted /= nt)
-    return shifted
+    return (dir, shifted)
+  where
+  groupedBy f = L.groupBy ((==) `on` f) . L.sortBy (comparing f)
 
 -- * Heuristics
 
@@ -102,21 +106,25 @@ currentTime :: IO DiffTime
 currentTime = fmap utctDayTime getCurrentTime
 
 evalDepth 
-  :: DiffTime -- ^ Absolute deadline
+  :: (Ord b)
+  => DiffTime -- ^ Absolute deadline
+  -> (a -> b)
   -> DecideConfig a
   -> Table
   -> ([Maybe a] -> Maybe a) -- ^ Heuristic combiner
   -> IO (Maybe a)
-evalDepth _ dc t c = go (dc_depth dc) t
+evalDepth _ scorer dc t c = go (dc_depth dc) t
   where
   go d t =
     case d of
       0 -> return . Just . f $ t
       _ -> do
-        nts <- validNexts (cut (dc_depth dc - d)) t
-        if null nts
-           then return . Just . f $ t
-           else fmap c . sequence . map (go (d - 1)) $ nts
+        nts_per_dir <- validNexts (cut (dc_depth dc - d)) $ t
+        score_per_dir <- forM nts_per_dir $
+                           fmap c . mapM (go (d - 1))
+        return $ if null score_per_dir
+          then Just (f t)
+          else L.maximumBy (comparing (fmap scorer)) score_per_dir
     where
     cut = dc_cut dc
     f = dc_heur dc
@@ -222,7 +230,7 @@ evalW :: WDecideConfig -> Table -> IO (Maybe (Int, Double))
 evalW dc t = do
   current_t <- currentTime
   let deadline = current_t + picosecondsToDiffTime (200 * 1000 * 1000 * 1000)
-  evalDepth deadline dc t weighted
+  evalDepth deadline snd dc t weighted
 
 data DecideConfig a = DecideConfig
   { dc_heur :: Table -> a
