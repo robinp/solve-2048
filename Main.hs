@@ -83,6 +83,7 @@ nexts (Table rows) =
       _       -> []
 
 type Cut = forall a . [a] -> IO [a]
+type DCut = Int -> Cut
 
 -- | Performs random tile generation + shift, yields only if the shift makes a
 --   difference.
@@ -115,7 +116,7 @@ evalDepth deadline dc t c = go (dc_depth dc) t
     else case d of
       0 -> return . Just . f $ t
       _ -> do
-        nts <- validNexts cut t
+        nts <- validNexts (cut (dc_depth dc - d)) t
         if null nts
            then return . Just . f $ t
            else fmap c . sequence . map (go (d - 1)) $ nts
@@ -197,11 +198,11 @@ type Heur = Table -> (Int, Double)
 
 toWeighted f = \t -> (1, f t)
 
-niceCut :: Int -> Cut
-niceCut n xs = do
+niceCut :: Int -> DCut
+niceCut n depth xs = do
   rnds <- replicateM (length xs) (randomRIO (0, 1000)) :: IO [Int]
   let ys = map snd . L.sortBy (comparing fst) . zip rnds $ xs
-  return $ take n ys
+  return $ take (n `div` 2^depth) ys
 
 heur1 t = 1.0  * feat_sum t 
         - 0.75 * feat_extra_powers t
@@ -229,15 +230,16 @@ evalW dc t = do
 data DecideConfig a = DecideConfig
   { dc_heur :: Table -> a
   , dc_depth :: Int
-  , dc_cut :: Cut
+  , dc_cut :: DCut
   }
 
 type WDecideConfig = DecideConfig (Int, Double)
 
-defaultConfig = DecideConfig (toWeighted heur1) 2 (return . id)
+defaultConfig = DecideConfig (toWeighted heur1) 2 (\_ xs -> return xs)
 bestConfig = defaultConfig 
   { dc_heur = toWeighted heur3
   , dc_depth = 3
+  , dc_cut = niceCut 8
   }
 
 decide :: WDecideConfig -> Table -> IO (Maybe (Dir, Table))

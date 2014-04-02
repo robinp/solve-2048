@@ -27,9 +27,10 @@ step dc t = do
       i <- randomRIO (0, length next_tables - 1)
       return $ Just (dir, next_tables !! i)
 
-loopSteps should_print dc t0 = go t0
+loopSteps remaining should_print dc t0 = go remaining t0
   where
-  go t = do
+  go (Just 0) _ = return 0  -- profiling
+  go mb_rem t = do
     when should_print $ print t
     res <- step dc t
     case res of 
@@ -40,11 +41,12 @@ loopSteps should_print dc t0 = go t0
           return max
       Just (d, t') -> do
         when should_print $ print d
-        go t'
+        go (fmap (\x -> x - 1) mb_rem) t'
 
 reference_config = defaultConfig
   { dc_heur = toWeighted heur3
   , dc_depth = 3
+  , dc_cut = niceCut 8
   }
 
 fast_config = reference_config
@@ -58,15 +60,20 @@ testConfig base_config = base_config
 main = do
   putStrLn "Sandbox starts"
   args <- getArgs
-  let fast = length args > 0
+  let fast = False
+      profile = length args > 0
       (chatty, reps, base) = 
         if fast then (False, 1, fast_config)
         else (True, 1, reference_config)
       test = testConfig base
-  putStrLn $ "Fast: " ++ show fast
-  putStrLn "-----NEXT-----"
-  next <- fmap sum . replicateM reps $ loopSteps chatty test initial_table
-  putStrLn "-----BASE-----"
-  base <- fmap sum . replicateM reps $ loopSteps chatty base initial_table
-  putStrLn $ show base ++ " --> " ++ show next ++ " " ++  
-               show (fromIntegral next / fromIntegral base) ++ "x improvement"
+  if profile
+  then do
+    void $ loopSteps (Just 15) chatty test initial_table
+  else do
+    putStrLn $ "Fast: " ++ show fast
+    putStrLn "-----NEXT-----"
+    next <- fmap sum . replicateM reps $ loopSteps Nothing chatty test initial_table
+    putStrLn "-----BASE-----"
+    base <- fmap sum . replicateM reps $ loopSteps Nothing chatty base initial_table
+    putStrLn $ show base ++ " --> " ++ show next ++ " " ++  
+                 show (fromIntegral next / fromIntegral base) ++ "x improvement"
