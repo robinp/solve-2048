@@ -107,13 +107,10 @@ evalDepth
   -> Table
   -> ([Maybe a] -> Maybe a) -- ^ Heuristic combiner
   -> IO (Maybe a)
-evalDepth deadline dc t c = go (dc_depth dc) t
+evalDepth _ dc t c = go (dc_depth dc) t
   where
-  go d t = do
-    current_t <- currentTime
-    if current_t >= deadline
-    then return Nothing
-    else case d of
+  go d t =
+    case d of
       0 -> return . Just . f $ t
       _ -> do
         nts <- validNexts (cut (dc_depth dc - d)) t
