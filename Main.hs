@@ -220,7 +220,7 @@ heur3 t = 0 --1.0  * feat_sum t
         + 1.0  * feat_free t
 
 heur4 t = 1.0  * feat_free t
-        -- + 0.25 * feat_ordered_rel t
+        + 0.25 * feat_ordered_rel t
         + 0.1  * feat_sticky t
 
 heur5 t = 1.0  * feat_free t
@@ -242,7 +242,7 @@ type WDecideConfig = DecideConfig (Int, Double)
 
 defaultConfig = DecideConfig (toWeighted heur1) 2 (\_ xs -> return xs)
 bestConfig = defaultConfig 
-  { dc_heur = toWeighted heur3
+  { dc_heur = toWeighted heur4
   , dc_depth = 3
   , dc_cut = niceCut 8
   }
